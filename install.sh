@@ -1,3 +1,4 @@
+#!/usr/bin/env bash
 # install.sh — installs Clipman on PopOS / any Wayland distro
 set -e
 
@@ -25,19 +26,23 @@ sed "s|%h|$HOME|g" clipman-daemon.desktop > "$AUTOSTART_DIR/clipman-daemon.deskt
 
 echo "==> Checking dependencies…"
 
+# GTK4 Python bindings
 if python3 -c "import gi; gi.require_version('Gtk','4.0'); from gi.repository import Gtk" 2>/dev/null; then
     echo "  [✓] PyGObject / GTK4"
 else
     echo "  [!] GTK4 bindings not found. Installing…"
     sudo apt install -y python3-gi gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0
 fi
+
+# Wayland clipboard tool
+if command -v wl-paste &>/dev/null; then
+    echo "  [✓] wl-clipboard"
+else
     echo "  [!] wl-clipboard not found. Installing…"
     sudo apt install -y wl-clipboard
-else
-    echo "  [✓] wl-clipboard"
 fi
 
-# Optional: Pillow for image thumbnails
+# Pillow for image thumbnails (optional)
 if python3 -c "from PIL import Image" 2>/dev/null; then
     echo "  [✓] Pillow"
 else

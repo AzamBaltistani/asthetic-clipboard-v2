@@ -32,13 +32,14 @@ LOG_FILE    = DATA_DIR / "clipd.log"
 # ─── Defaults ─────────────────────────────────────────────────────────────────
 
 DEFAULT_PREFS = {
-    "max_history":    200,
+    "max_history":    50,
     "max_image_size": 50,      # MB — images larger than this are skipped
     "store_images":   True,
     "dark_mode":      True,
     "font_size":      13,
     "trim_whitespace": True,
     "deduplicate":    True,
+    "keep_history":   True,    # if False, clears non-pinned history on startup
 }
 
 # ─── Logging ──────────────────────────────────────────────────────────────────
@@ -520,6 +521,11 @@ def main():
     prefs = load_prefs()
     prefs_ref = [prefs]   # mutable container so threads share live prefs
     conn = open_db()
+
+    # Honour keep_history: if disabled, wipe unpinned items on each startup
+    if not prefs.get("keep_history", True):
+        log.info("keep_history=False — clearing unpinned history on startup.")
+        clear_history(conn, keep_pinned=True)
 
     stop_event = threading.Event()
 
