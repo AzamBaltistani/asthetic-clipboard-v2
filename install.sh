@@ -1,4 +1,3 @@
-#!/usr/bin/env bash
 # install.sh — installs Clipman on PopOS / any Wayland distro
 set -e
 

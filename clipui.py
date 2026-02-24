@@ -1,4 +1,3 @@
-#!/usr/bin/python3
 """
 clipui.py — Aesthetic Clipboard v2
 GTK4 clipboard history viewer for Wayland/COSMIC (PopOS 24).
