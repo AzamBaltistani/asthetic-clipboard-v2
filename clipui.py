@@ -1,3 +1,4 @@
+#!/usr/bin/python3
 """
 clipui.py — Aesthetic Clipboard v2
 GTK4 clipboard history viewer for Wayland/COSMIC (PopOS 24).
@@ -22,7 +23,7 @@ try:
     gi.require_version("Gtk", "4.0")
     gi.require_version("Gdk", "4.0")
     gi.require_version("GdkPixbuf", "2.0")
-    from gi.repository import Gtk, Gdk, GdkPixbuf, GLib, Gio, Pango
+    from gi.repository import Gtk, Gdk, GdkPixbuf, GLib, Pango
 except ImportError:
     print("PyGObject / GTK4 not found.")
     print("Run with system Python: /usr/bin/python3 ~/.local/share/clipman/clipui.py")
@@ -421,7 +422,8 @@ class ClipRow(Gtk.ListBoxRow):
                     pixbuf = GdkPixbuf.Pixbuf.new_from_file_at_scale(
                         thumb_path, 48, 48, True
                     )
-                    img_w = Gtk.Picture.new_for_pixbuf(pixbuf)
+                    img_w = Gtk.Picture()
+                    img_w.set_pixbuf(pixbuf)
                     img_w.set_size_request(48, 48)
                     img_w.add_css_class("thumb-image")
                     img_w.set_content_fit(Gtk.ContentFit.CONTAIN)
@@ -616,9 +618,9 @@ class PrefsPopover(Gtk.Popover):
 
 # ─── Main window ──────────────────────────────────────────────────────────────
 
-class AestheticClipboardWindow(Gtk.ApplicationWindow):
-    def __init__(self, app):
-        super().__init__(application=app)
+class AestheticClipboardWindow(Gtk.Window):
+    def __init__(self):
+        super().__init__()
         self.client        = ClipmanClient()
         self._search_query = ""
         self._daemon_ok    = False
@@ -627,6 +629,7 @@ class AestheticClipboardWindow(Gtk.ApplicationWindow):
         self.set_title("Aesthetic Clipboard v2")
         self.set_default_size(360, 520)
         self.set_resizable(True)
+        self.set_hide_on_close(True)   # hide instead of destroy on close
         self.add_css_class("ac-window")
 
         # Close on focus loss
@@ -648,6 +651,30 @@ class AestheticClipboardWindow(Gtk.ApplicationWindow):
         apply_css(self._dark_mode)
 
         self._load_history()
+        self._start_toggle_server()
+
+    # ── Toggle socket (single-instance) ───────────────────────────────────
+
+    def _start_toggle_server(self):
+        import socket as _socket
+        TOGGLE_SOCK.unlink(missing_ok=True)
+        srv = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        srv.bind(str(TOGGLE_SOCK))
+        srv.listen(1)
+
+        def _listen():
+            while True:
+                try:
+                    conn, _ = srv.accept()
+                    conn.recv(64)
+                    conn.close()
+                    # Switch to main thread to show window
+                    GLib.idle_add(self.show_and_refresh)
+                except Exception:
+                    break
+
+        t = threading.Thread(target=_listen, daemon=True)
+        t.start()
 
     # ── UI ────────────────────────────────────────────────────────────────
 
@@ -787,7 +814,7 @@ class AestheticClipboardWindow(Gtk.ApplicationWindow):
 
     def _on_copy(self, item_id: int):
         threading.Thread(target=lambda: self.client.copy(item_id), daemon=True).start()
-        self.close()
+        self.set_visible(False)
 
     def _on_pin(self, item_id: int, row: ClipRow):
         def do():
@@ -873,13 +900,15 @@ class AestheticClipboardWindow(Gtk.ApplicationWindow):
 
     def _on_search_changed(self, entry):
         self._search_query = entry.get_text().strip()
-        if hasattr(self, "_search_timer"):
+        if getattr(self, "_search_timer", None) is not None:
             GLib.source_remove(self._search_timer)
+            self._search_timer = None
         self._search_timer = GLib.timeout_add(200, self._do_search)
 
     def _do_search(self):
+        self._search_timer = None   # timer fired — clear the id
         self._load_history(self._search_query)
-        return False
+        return False   # don't repeat
 
     def _on_search_enter(self, _):
         row = self._listbox.get_row_at_index(0)
@@ -889,42 +918,92 @@ class AestheticClipboardWindow(Gtk.ApplicationWindow):
     # ── Window events ─────────────────────────────────────────────────────
 
     def _on_focus_leave(self, ctrl):
-        self.close()
+        self.set_visible(False)
 
     def _on_key(self, ctrl, keyval, keycode, state):
         if keyval == Gdk.KEY_Escape:
-            self.close()
+            self.set_visible(False)
             return True
         return False
 
-    def present_focused(self):
+    def show_and_refresh(self):
+        """Called each time Super+V is pressed. Reload history and show."""
+        # Clear search box
+        self._search.set_text("")
+        self._search_query = ""
+        # Re-check daemon and reload fresh history
+        self._check_daemon()
+        self._load_history()
+        # Apply current theme in case prefs changed externally
+        prefs = self.client.get_prefs()
+        if prefs.get("dark_mode", True) != self._dark_mode:
+            self._dark_mode = prefs.get("dark_mode", True)
+            apply_css(self._dark_mode)
         self.present()
-        GLib.idle_add(self._search.grab_focus)
+        self._search.grab_focus()
 
 
 # ─── Application ──────────────────────────────────────────────────────────────
 
-class AestheticClipboardApp(Gtk.Application):
-    def __init__(self):
-        super().__init__(
-            application_id=APP_ID,
-            flags=Gio.ApplicationFlags.DEFAULT_FLAGS,
-        )
-        self.window = None
+TOGGLE_SOCK = Path.home() / ".local" / "share" / "clipman" / "clipui.sock"
+UI_PID_FILE = Path.home() / ".local" / "share" / "clipman" / "clipui.pid"
 
-    def do_activate(self):
-        if self.window is None:
-            self.window = AestheticClipboardWindow(self)
-        self.window.present_focused()
 
-    def do_startup(self):
-        Gtk.Application.do_startup(self)
-        apply_css(dark=True)   # default until prefs load
+def _signal_existing() -> bool:
+    """
+    Check PID file first (race-free), then try the socket.
+    Returns True if a live instance was signalled.
+    """
+    import socket as _socket
+
+    # Check PID file — is there a live process?
+    if UI_PID_FILE.exists():
+        try:
+            pid = int(UI_PID_FILE.read_text().strip())
+            os.kill(pid, 0)   # raises if process doesn't exist
+        except (ProcessLookupError, ValueError, PermissionError):
+            # Stale pid file
+            UI_PID_FILE.unlink(missing_ok=True)
+            TOGGLE_SOCK.unlink(missing_ok=True)
+            return False
+
+        # Process is alive — signal via socket
+        try:
+            s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+            s.settimeout(1.0)
+            s.connect(str(TOGGLE_SOCK))
+            s.sendall(b"show")
+            s.close()
+            return True
+        except Exception:
+            pass
+
+    return False
 
 
 def main():
-    app = AestheticClipboardApp()
-    sys.exit(app.run(sys.argv))
+    import signal as _signal
+
+    if _signal_existing():
+        sys.exit(0)
+
+    # Write our PID
+    UI_PID_FILE.write_text(str(os.getpid()))
+
+    win = AestheticClipboardWindow()
+    win.present()
+
+    loop = GLib.MainLoop()
+
+    def on_quit(*_):
+        TOGGLE_SOCK.unlink(missing_ok=True)
+        UI_PID_FILE.unlink(missing_ok=True)
+        loop.quit()
+
+    _signal.signal(_signal.SIGTERM, on_quit)
+    _signal.signal(_signal.SIGINT,  on_quit)
+
+    loop.run()
 
 
 if __name__ == "__main__":
