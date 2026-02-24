@@ -11,6 +11,9 @@ mkdir -p "$INSTALL_DIR" "$BIN_DIR" "$AUTOSTART_DIR"
 echo "==> Copying files…"
 cp clipd.py      "$INSTALL_DIR/clipd.py"
 cp ipc_client.py "$INSTALL_DIR/ipc_client.py"
+cp clipui.py     "$INSTALL_DIR/clipui.py"
+chmod +x "$INSTALL_DIR/clipui.py"
+ln -sf "$INSTALL_DIR/clipui.py" "$BIN_DIR/clipui"
 
 # Symlink the daemon into PATH
 ln -sf "$INSTALL_DIR/clipd.py" "$BIN_DIR/clipd"
@@ -22,7 +25,12 @@ sed "s|%h|$HOME|g" clipman-daemon.desktop > "$AUTOSTART_DIR/clipman-daemon.deskt
 
 echo "==> Checking dependencies…"
 
-if ! command -v wl-paste &>/dev/null; then
+if python3 -c "import gi; gi.require_version('Gtk','4.0'); from gi.repository import Gtk" 2>/dev/null; then
+    echo "  [✓] PyGObject / GTK4"
+else
+    echo "  [!] GTK4 bindings not found. Installing…"
+    sudo apt install -y python3-gi gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0
+fi
     echo "  [!] wl-clipboard not found. Installing…"
     sudo apt install -y wl-clipboard
 else
@@ -48,10 +56,12 @@ else
 fi
 
 echo ""
-echo "╔══════════════════════════════════════════════════════╗"
-echo "║  Clipman daemon installed and running!               ║"
-echo "║                                                      ║"
-echo "║  Next step: install the GUI (clipui.py)              ║"
-echo "║  Then bind Super+V to:                               ║"
-echo "║    python3 ~/.local/share/clipman/clipui.py          ║"
-echo "╚══════════════════════════════════════════════════════╝"
+echo "╔══════════════════════════════════════════════════════════╗"
+echo "║  Clipman installed and running!                          ║"
+echo "║                                                          ║"
+echo "║  Bind Super+V in COSMIC Settings → Keyboard:             ║"
+echo "║    python3 ~/.local/share/clipman/clipui.py              ║"
+echo "║                                                          ║"
+echo "║  Or test the GUI right now:                              ║"
+echo "║    python3 ~/.local/share/clipman/clipui.py              ║"
+echo "╚══════════════════════════════════════════════════════════╝"
