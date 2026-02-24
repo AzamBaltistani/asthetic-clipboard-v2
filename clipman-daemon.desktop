@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Clipman Daemon
+Comment=Clipboard history manager background process
+Exec=python3 %h/.local/share/clipman/clipd.py
+Icon=edit-paste
+Hidden=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-COSMIC-Autostart=true
