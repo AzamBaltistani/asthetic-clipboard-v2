@@ -203,16 +203,19 @@ window {{
     padding: 3px 8px;
     min-height: 0;
 }}
+
+/* tighter search box height */
 .ac-search {{
     background-color: {t['bg3']};
     border: 1px solid {t['border2']};
     border-radius: 5px;
     color: {t['text']};
-    padding: 2px 8px;
+    padding: 0px 8px;
     font-family: 'JetBrains Mono', monospace;
     font-size: 12px;
     caret-color: {t['accent']};
     min-height: 0;
+    -gtk-icon-size: 14px;
 }}
 .ac-search:focus {{
     border-color: {t['accent']};
@@ -220,14 +223,17 @@ window {{
 .ac-search placeholder {{
     color: {t['muted']};
 }}
+
+/* prefs button — no arrow, just the gear icon */
 .prefs-btn {{
     background-color: transparent;
     border: 1px solid {t['border2']};
     border-radius: 5px;
     color: {t['muted']};
-    padding: 2px 8px;
+    padding: 0px 8px;
     font-size: 14px;
     min-height: 0;
+    min-width: 0;
 }}
 .prefs-btn:hover {{
     background-color: {t['bg4']};
@@ -323,6 +329,15 @@ scrollbar slider {{
 }}
 scrollbar slider:hover {{
     background-color: {t['muted']};
+}}
+
+/* AlertDialog — force dark text in light theme */
+messagedialog .message-dialog-body label,
+messagedialog label,
+dialog label,
+.dialog-body label,
+alertdialog label {{
+    color: {t['text']};
 }}
 """.encode()
 
@@ -631,6 +646,10 @@ class AestheticClipboardWindow(Gtk.Window):
         self.set_hide_on_close(True)   # hide instead of destroy on close
         self.add_css_class("ac-window")
 
+        # track popover open state so focus-leave doesn't close
+        # the window when the settings popover is open
+        self._prefs_popover_open = False
+
         # Close on focus loss
         fc = Gtk.EventControllerFocus()
         fc.connect("leave", self._on_focus_leave)
@@ -667,7 +686,6 @@ class AestheticClipboardWindow(Gtk.Window):
                     conn, _ = srv.accept()
                     conn.recv(64)
                     conn.close()
-                    # Switch to main thread to show window
                     GLib.idle_add(self.show_and_refresh)
                 except Exception:
                     break
@@ -724,8 +742,10 @@ class AestheticClipboardWindow(Gtk.Window):
         self._search.connect("activate", self._on_search_enter)
         footer.append(self._search)
 
-        prefs_btn = Gtk.MenuButton()
-        prefs_btn.set_label("⚙")
+        #  3: Use a plain Button instead of MenuButton so no
+        # dropdown arrow is rendered, and manually popup/popdown the
+        # popover. This also lets us track open state for the focus fix.
+        prefs_btn = Gtk.Button(label="⚙")
         prefs_btn.add_css_class("prefs-btn")
         prefs_btn.set_valign(Gtk.Align.CENTER)
         prefs_btn.set_tooltip_text("Preferences")
@@ -736,11 +756,28 @@ class AestheticClipboardWindow(Gtk.Window):
             on_clear=self._on_clear,
             on_stop=self._on_stop,
         )
-        prefs_btn.set_popover(self._prefs_popover)
+        self._prefs_popover.set_parent(prefs_btn)
+
+        # Track popover open/close so focus-leave doesn't hide the window
+        self._prefs_popover.connect("closed", self._on_popover_closed)
+
+        prefs_btn.connect("clicked", self._on_prefs_btn_clicked)
         footer.append(prefs_btn)
 
         root.append(footer)
         self.set_child(root)
+
+    def _on_prefs_btn_clicked(self, btn):
+        """Toggle the prefs popover open/closed."""
+        if self._prefs_popover.is_visible():
+            self._prefs_popover.popdown()
+            self._prefs_popover_open = False
+        else:
+            self._prefs_popover_open = True
+            self._prefs_popover.popup()
+
+    def _on_popover_closed(self, popover):
+        self._prefs_popover_open = False
 
     # ── Daemon ────────────────────────────────────────────────────────────
 
@@ -905,9 +942,9 @@ class AestheticClipboardWindow(Gtk.Window):
         self._search_timer = GLib.timeout_add(200, self._do_search)
 
     def _do_search(self):
-        self._search_timer = None   # timer fired — clear the id
+        self._search_timer = None
         self._load_history(self._search_query)
-        return False   # don't repeat
+        return False
 
     def _on_search_enter(self, _):
         row = self._listbox.get_row_at_index(0)
@@ -917,23 +954,31 @@ class AestheticClipboardWindow(Gtk.Window):
     # ── Window events ─────────────────────────────────────────────────────
 
     def _on_focus_leave(self, ctrl):
-        self.set_visible(False)
+        # don't hide if the prefs popover is open — the popover
+        # temporarily steals window focus, which would otherwise trigger
+        # an unwanted hide. We also use a small idle delay so the popover
+        # has time to report its new visibility state before we decide.
+        def _maybe_hide():
+            if not self._prefs_popover_open and not self._prefs_popover.is_visible():
+                self.set_visible(False)
+        GLib.idle_add(_maybe_hide)
 
     def _on_key(self, ctrl, keyval, keycode, state):
         if keyval == Gdk.KEY_Escape:
-            self.set_visible(False)
+            # If prefs are open, close them first; second Escape hides window
+            if self._prefs_popover.is_visible():
+                self._prefs_popover.popdown()
+            else:
+                self.set_visible(False)
             return True
         return False
 
     def show_and_refresh(self):
         """Called each time Super+V is pressed. Reload history and show."""
-        # Clear search box
         self._search.set_text("")
         self._search_query = ""
-        # Re-check daemon and reload fresh history
         self._check_daemon()
         self._load_history()
-        # Apply current theme in case prefs changed externally
         prefs = self.client.get_prefs()
         if prefs.get("dark_mode", True) != self._dark_mode:
             self._dark_mode = prefs.get("dark_mode", True)
@@ -955,18 +1000,15 @@ def _signal_existing() -> bool:
     """
     import socket as _socket
 
-    # Check PID file — is there a live process?
     if UI_PID_FILE.exists():
         try:
             pid = int(UI_PID_FILE.read_text().strip())
-            os.kill(pid, 0)   # raises if process doesn't exist
+            os.kill(pid, 0)
         except (ProcessLookupError, ValueError, PermissionError):
-            # Stale pid file
             UI_PID_FILE.unlink(missing_ok=True)
             TOGGLE_SOCK.unlink(missing_ok=True)
             return False
 
-        # Process is alive — signal via socket
         try:
             s = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
             s.settimeout(1.0)
@@ -986,7 +1028,6 @@ def main():
     if _signal_existing():
         sys.exit(0)
 
-    # Write our PID
     UI_PID_FILE.write_text(str(os.getpid()))
 
     win = AestheticClipboardWindow()
